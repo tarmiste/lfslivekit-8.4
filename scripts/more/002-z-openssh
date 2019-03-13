@@ -1,0 +1,149 @@
+#!/bin/bash
+set -e
+
+export JH_PKG_DIR=openssh
+SRC_DIR=${JH_SRC_ARCHIVE}${JH_SRC_SUBDIRS:+/${JH_PKG_DIR}}
+BUILD_DIR=${JH_BUILD_ROOT}${JH_BUILD_SUBDIRS:+/${JH_PKG_DIR}}
+mkdir -p $SRC_DIR
+mkdir -p $BUILD_DIR
+
+cd $SRC_DIR
+
+PACKAGE=openssh-7.9p1.tar.gz
+if [[ ! -f $PACKAGE ]] ; then
+  if [[ -f $JH_SRC_ARCHIVE/$PACKAGE ]] ; then
+    cp $JH_SRC_ARCHIVE/$PACKAGE $PACKAGE
+  else
+    wget -T 30 -t 5 http://ftp.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-7.9p1.tar.gz ||
+    wget -T 30 -t 5 ${JH_FTP_SERVER}svn/o/$PACKAGE
+  fi
+fi
+echo "c6af50b7a474d04726a5aa747a5dce8f  $PACKAGE" | md5sum -c -
+
+PATCH=openssh-7.9p1-security_fix-1.patch
+if [[ ! -f $PATCH ]] ; then
+  if [[ -f $JH_SRC_ARCHIVE/$PATCH ]] ; then
+    cp $JH_SRC_ARCHIVE/$PATCH $PATCH
+  else
+    wget -T 30 -t 5 http://www.linuxfromscratch.org/patches/blfs/8.4/openssh-7.9p1-security_fix-1.patch ||
+    wget -T 30 -t 5 ${JH_FTP_SERVER}svn/o/$PATCH
+  fi
+fi
+[[ "$SRC_DIR" != "$BUILD_DIR" ]] && ln -sf $SRC_DIR/$PATCH $BUILD_DIR
+
+
+cd $BUILD_DIR
+find . -maxdepth 1 -mindepth 1 -type d | xargs rm -rf
+
+case $PACKAGE in
+  *.tar.gz|*.tar.bz2|*.tar.xz|*.tgz|*.tar.lzma)
+     tar -xvf $SRC_DIR/$PACKAGE > unpacked
+     JH_UNPACKDIR=`grep '[^./]\+' unpacked | head -n1 | sed 's@^\./@@;s@/.*@@'`
+     ;;
+  *.tar.lz)
+     bsdtar -xvf $SRC_DIR/$PACKAGE 2> unpacked
+     JH_UNPACKDIR=`head -n1 unpacked | cut  -d" " -f2 | sed 's@^\./@@;s@/.*@@'`
+     ;;
+  *.zip)
+     zipinfo -1 $SRC_DIR/$PACKAGE > unpacked
+     JH_UNPACKDIR="$(sed 's@/.*@@' unpacked | uniq )"
+     if test $(wc -w <<< $JH_UNPACKDIR) -eq 1; then
+       unzip $SRC_DIR/$PACKAGE
+     else
+       JH_UNPACKDIR=${PACKAGE%.zip}
+       unzip -d $JH_UNPACKDIR $SRC_DIR/$PACKAGE
+     fi
+     ;;
+  *)
+     JH_UNPACKDIR=$JH_PKG_DIR-build
+     mkdir $JH_UNPACKDIR
+     cp $SRC_DIR/$PACKAGE $JH_UNPACKDIR
+     cp $(find . -mindepth 1 -maxdepth 1 -type l) $JH_UNPACKDIR
+     ;;
+esac
+export JH_UNPACKDIR
+cd $JH_UNPACKDIR
+
+install  -v -m700 -d /var/lib/sshd &&
+chown    -v root:sys /var/lib/sshd &&
+
+groupadd -g 50 sshd        &&
+useradd  -c 'sshd PrivSep' \
+         -d /var/lib/sshd  \
+         -g sshd           \
+         -s /bin/false     \
+         -u 50 sshd
+patch -Np1 -i ../openssh-7.9p1-security_fix-1.patch &&
+./configure --prefix=/usr                     \
+            --sysconfdir=/etc/ssh             \
+            --with-md5-passwords              \
+            --with-privsep-path=/var/lib/sshd &&
+make
+#make -k tests || true
+make -j1 install &&
+install -v -m755    contrib/ssh-copy-id /usr/bin     &&
+
+install -v -m644    contrib/ssh-copy-id.1 \
+                    /usr/share/man/man1              &&
+install -v -m755 -d /usr/share/doc/openssh-7.9p1     &&
+install -v -m644    INSTALL LICENCE OVERVIEW README* \
+                    /usr/share/doc/openssh-7.9p1
+
+for libdir in /lib /usr/lib $(find /opt -name lib); do
+  find $libdir -name \*.la           \
+             ! -path \*ImageMagick\* \
+               -delete
+done
+
+
+ldconfig
+
+echo "PermitRootLogin no" >> /etc/ssh/sshd_config
+
+ssh-keygen &&
+ssh-copy-id -i ~/.ssh/id_rsa.pub **EDITMEREMOTE_USERNAMEEDITME**@**EDITMEREMOTE_HOSTNAMEEDITME**
+
+echo "PasswordAuthentication no" >> /etc/ssh/sshd_config &&
+echo "ChallengeResponseAuthentication no" >> /etc/ssh/sshd_config
+
+sed 's@d/login@d/sshd@g' /etc/pam.d/login > /etc/pam.d/sshd &&
+chmod 644 /etc/pam.d/sshd &&
+echo "UsePAM yes" >> /etc/ssh/sshd_config
+
+BOOTPKG_DIR=blfs-bootscripts
+BOOTSRC_DIR=${JH_SRC_ARCHIVE}${JH_SRC_SUBDIRS:+/${BOOTPKG_DIR}}
+BOOTBUILD_DIR=${JH_BUILD_ROOT}${JH_BUILD_SUBDIRS:+/${BOOTPKG_DIR}}
+mkdir -p $BOOTSRC_DIR
+mkdir -p $BOOTBUILD_DIR
+
+pushd $BOOTSRC_DIR
+URL=http://anduin.linuxfromscratch.org/BLFS/blfs-bootscripts/blfs-bootscripts-20180105.tar.xz
+BOOTPACKG=$(basename $URL)
+if [[ ! -f $BOOTPACKG ]] ; then
+  if [[ -f $JH_SRC_ARCHIVE/$BOOTPACKG ]] ; then
+    cp $JH_SRC_ARCHIVE/$BOOTPACKG $BOOTPACKG
+  else
+    wget -T 30 -t 5 $URL
+  fi
+  rm -f $BOOTBUILD_DIR/unpacked
+fi
+
+cd $BOOTBUILD_DIR
+if [[ -e unpacked ]] ; then
+  BOOTUNPACKDIR=`head -n1 unpacked | sed 's@^./@@;s@/.*@@'`
+  if ! [[ -d $BOOTUNPACKDIR ]]; then
+    tar -xvf $BOOTSRC_DIR/$BOOTPACKG > unpacked
+    BOOTUNPACKDIR=`head -n1 unpacked | sed 's@^./@@;s@/.*@@'`
+  fi
+else
+  tar -xvf $BOOTSRC_DIR/$BOOTPACKG > unpacked
+  BOOTUNPACKDIR=`head -n1 unpacked | sed 's@^./@@;s@/.*@@'`
+fi
+cd $BOOTUNPACKDIR
+make -j1 install-sshd
+
+popd
+cd $BUILD_DIR
+[[ -n "$JH_KEEP_FILES" ]] || rm -rf $JH_UNPACKDIR unpacked
+
+exit

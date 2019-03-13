@@ -1,0 +1,152 @@
+#!/bin/bash
+set -e
+
+export JH_PKG_DIR=ntp
+SRC_DIR=${JH_SRC_ARCHIVE}${JH_SRC_SUBDIRS:+/${JH_PKG_DIR}}
+BUILD_DIR=${JH_BUILD_ROOT}${JH_BUILD_SUBDIRS:+/${JH_PKG_DIR}}
+mkdir -p $SRC_DIR
+mkdir -p $BUILD_DIR
+
+cd $SRC_DIR
+
+PACKAGE=ntp-4.2.8p12.tar.gz
+if [[ ! -f $PACKAGE ]] ; then
+  if [[ -f $JH_SRC_ARCHIVE/$PACKAGE ]] ; then
+    cp $JH_SRC_ARCHIVE/$PACKAGE $PACKAGE
+  else
+    wget -T 30 -t 5 https://www.eecis.udel.edu/~ntp/ntp_spool/ntp4/ntp-4.2/ntp-4.2.8p12.tar.gz ||
+    wget -T 30 -t 5 ${JH_FTP_SERVER}svn/n/$PACKAGE
+  fi
+fi
+echo "1522d66574bae14abb2622746dad2bdc  $PACKAGE" | md5sum -c -
+
+
+cd $BUILD_DIR
+find . -maxdepth 1 -mindepth 1 -type d | xargs rm -rf
+
+case $PACKAGE in
+  *.tar.gz|*.tar.bz2|*.tar.xz|*.tgz|*.tar.lzma)
+     tar -xvf $SRC_DIR/$PACKAGE > unpacked
+     JH_UNPACKDIR=`grep '[^./]\+' unpacked | head -n1 | sed 's@^\./@@;s@/.*@@'`
+     ;;
+  *.tar.lz)
+     bsdtar -xvf $SRC_DIR/$PACKAGE 2> unpacked
+     JH_UNPACKDIR=`head -n1 unpacked | cut  -d" " -f2 | sed 's@^\./@@;s@/.*@@'`
+     ;;
+  *.zip)
+     zipinfo -1 $SRC_DIR/$PACKAGE > unpacked
+     JH_UNPACKDIR="$(sed 's@/.*@@' unpacked | uniq )"
+     if test $(wc -w <<< $JH_UNPACKDIR) -eq 1; then
+       unzip $SRC_DIR/$PACKAGE
+     else
+       JH_UNPACKDIR=${PACKAGE%.zip}
+       unzip -d $JH_UNPACKDIR $SRC_DIR/$PACKAGE
+     fi
+     ;;
+  *)
+     JH_UNPACKDIR=$JH_PKG_DIR-build
+     mkdir $JH_UNPACKDIR
+     cp $SRC_DIR/$PACKAGE $JH_UNPACKDIR
+     cp $(find . -mindepth 1 -maxdepth 1 -type l) $JH_UNPACKDIR
+     ;;
+esac
+export JH_UNPACKDIR
+cd $JH_UNPACKDIR
+
+groupadd -g 87 ntp &&
+useradd -c "Network Time Protocol" -d /var/lib/ntp -u 87 \
+        -g ntp -s /bin/false ntp
+sed -e 's/"(\\S+)"/"?([^\\s"]+)"?/' \
+    -i scripts/update-leap/update-leap.in
+./configure CFLAGS="-O2 -g -fPIC" \
+            --prefix=/usr         \
+            --bindir=/usr/sbin    \
+            --sysconfdir=/etc     \
+            --enable-linuxcaps    \
+            --with-lineeditlibs=readline \
+            --docdir=/usr/share/doc/ntp-4.2.8p12 &&
+make
+#make -k check || true
+make -j1 install &&
+install -v -o ntp -g ntp -d /var/lib/ntp
+
+for libdir in /lib /usr/lib $(find /opt -name lib); do
+  find $libdir -name \*.la           \
+             ! -path \*ImageMagick\* \
+               -delete
+done
+
+
+ldconfig
+
+cat > /etc/ntp.conf << "EOF"
+# Asia
+server 0.asia.pool.ntp.org
+
+# Australia
+server 0.oceania.pool.ntp.org
+
+# Europe
+server 0.europe.pool.ntp.org
+
+# North America
+server 0.north-america.pool.ntp.org
+
+# South America
+server 2.south-america.pool.ntp.org
+
+driftfile /var/lib/ntp/ntp.drift
+pidfile   /var/run/ntpd.pid
+
+leapfile  /etc/ntp.leapseconds
+EOF
+
+cat >> /etc/ntp.conf << "EOF"
+# Security session
+restrict    default limited kod nomodify notrap nopeer noquery
+restrict -6 default limited kod nomodify notrap nopeer noquery
+
+restrict 127.0.0.1
+restrict ::1
+EOF
+
+BOOTPKG_DIR=blfs-bootscripts
+BOOTSRC_DIR=${JH_SRC_ARCHIVE}${JH_SRC_SUBDIRS:+/${BOOTPKG_DIR}}
+BOOTBUILD_DIR=${JH_BUILD_ROOT}${JH_BUILD_SUBDIRS:+/${BOOTPKG_DIR}}
+mkdir -p $BOOTSRC_DIR
+mkdir -p $BOOTBUILD_DIR
+
+pushd $BOOTSRC_DIR
+URL=http://anduin.linuxfromscratch.org/BLFS/blfs-bootscripts/blfs-bootscripts-20180105.tar.xz
+BOOTPACKG=$(basename $URL)
+if [[ ! -f $BOOTPACKG ]] ; then
+  if [[ -f $JH_SRC_ARCHIVE/$BOOTPACKG ]] ; then
+    cp $JH_SRC_ARCHIVE/$BOOTPACKG $BOOTPACKG
+  else
+    wget -T 30 -t 5 $URL
+  fi
+  rm -f $BOOTBUILD_DIR/unpacked
+fi
+
+cd $BOOTBUILD_DIR
+if [[ -e unpacked ]] ; then
+  BOOTUNPACKDIR=`head -n1 unpacked | sed 's@^./@@;s@/.*@@'`
+  if ! [[ -d $BOOTUNPACKDIR ]]; then
+    tar -xvf $BOOTSRC_DIR/$BOOTPACKG > unpacked
+    BOOTUNPACKDIR=`head -n1 unpacked | sed 's@^./@@;s@/.*@@'`
+  fi
+else
+  tar -xvf $BOOTSRC_DIR/$BOOTPACKG > unpacked
+  BOOTUNPACKDIR=`head -n1 unpacked | sed 's@^./@@;s@/.*@@'`
+fi
+cd $BOOTUNPACKDIR
+make -j1 install-ntpd
+
+popd
+ln -v -sf ../init.d/setclock /etc/rc.d/rc0.d/K46setclock &&
+ln -v -sf ../init.d/setclock /etc/rc.d/rc6.d/K46setclock
+
+cd $BUILD_DIR
+[[ -n "$JH_KEEP_FILES" ]] || rm -rf $JH_UNPACKDIR unpacked
+
+exit
